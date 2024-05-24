@@ -28,7 +28,7 @@ import org.http4k.core.Method
 import org.http4k.core.Request
 import org.http4k.format.Jackson.auto
 import java.io.File
-import java.time.LocalTime
+import java.io.IOException
 import kotlin.concurrent.thread
 import kotlin.io.path.Path
 
@@ -53,13 +53,15 @@ Store SMART information of drives for Fan Control
 Usage: SmartmonServer.kts [options] <work_directory> <url>
 
 Options:
-  -l --log-level=<level>  Log level [default: INFO]
+  -l --log-level=<level>           Log level [default: INFO]
+  -p --polling-interval=<seconds>  Polling interval in seconds [default: 20]
 """
 
 val doArgs: MutableMap<String, Any> = Docopt(usage).parse(args.toList())
 val workDir = doArgs.getOrDefault("<work_directory>", ".").toString()
 val url = doArgs.getOrDefault("<url>", "http://localhost:9000").toString()
-val logLevel = Level.toLevel(doArgs.getOrDefault("--log-level", "INFO").toString())
+val logLevel: Level = Level.toLevel(doArgs.getOrDefault("--log-level", "INFO").toString())
+val pollingIntervalMs = doArgs.getOrDefault("--polling-interval", "20").toString().toLong() * 1000
 
 val rootLogger = org.slf4j.LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME) as Logger
 rootLogger.level = logLevel
@@ -81,33 +83,42 @@ fun fetchSmartMonData(): List<Pair<String, Double>> {
     }
 }
 
-logger.info("Starting SmartMonClient: workdir=$workDir, url=$url")
+logger.info("Starting SmartMonClient: workdir=$workDir, url=$url, pollingInterval=${pollingIntervalMs / 1000} s.")
 
-val thread = thread(start = false, name = "PollingThread") {
-    try {
-        var firstTime = true
-        while (!Thread.currentThread().isInterrupted) {
-            fetchSmartMonData()
-                .also {
-                    if (firstTime) {
-                        logger.info("Got following drives: ${it.joinToString(", ") { (key, _) -> key }}")
-                        firstTime = false
+val thread =
+    thread(start = false, name = "PollingThread") {
+        try {
+            var firstTime = true
+            while (!Thread.currentThread().isInterrupted) {
+                fetchSmartMonData()
+                    .also {
+                        if (firstTime) {
+                            logger.info("Got following drives: ${it.joinToString(", ") { (key, _) -> key }}")
+                            firstTime = false
+                        }
                     }
-                }
-                .forEach { (key, value) ->
-                    val path = Path(workDir).resolve(Path("$key.sensor"))
-                    logger.debug("Writing $value to $path")
-                    File(path.toUri()).writeText(value.toString())
-                }
-            Thread.sleep(20000) // Sleep for 20 seconds
+                    .forEach { (key, value) ->
+                        val path = Path(workDir).resolve(Path("$key.sensor"))
+                        logger.debug("Writing {} to {}", value, path)
+                        try {
+                            File(path.toUri()).writeText(value.toString())
+                        } catch (e: IOException) {
+                            logger.error("Failed to write to $path. Re-try next time", e)
+                        }
+                    }
+                Thread.sleep(pollingIntervalMs)
+            }
+        } catch (e: InterruptedException) {
+            // Graceful shutdown
         }
-    } catch (e: InterruptedException) { /* Graceful shutdown */ }
-}
+    }
 
-Runtime.getRuntime().addShutdownHook(Thread {
-    logger.info("Shutting down...")
-    thread.interrupt()
-})
+Runtime.getRuntime().addShutdownHook(
+    Thread {
+        logger.info("Shutting down...")
+        thread.interrupt()
+    },
+)
 
 thread.start()
 thread.join()
