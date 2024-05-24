@@ -27,6 +27,7 @@ import org.http4k.core.Body
 import org.http4k.core.Method
 import org.http4k.core.Request
 import org.http4k.format.Jackson.auto
+import org.http4k.lens.LensFailure
 import java.io.File
 import java.io.IOException
 import kotlin.concurrent.thread
@@ -77,9 +78,14 @@ fun fetchSmartMonData(): List<Pair<String, Double>> {
         logger.error("Failed to fetch data from $url, status code: ${response.status.code}")
         return emptyList()
     } else {
-        return listSmartMonDataLens
-            .extract(response)
-            .map { it.modelName.replace("\\s+".toRegex(), "") to it.temperature.current }
+        return try {
+            listSmartMonDataLens
+                .extract(response)
+                .map { it.modelName.replace("\\s+".toRegex(), "") to it.temperature.current }
+        } catch (e: LensFailure) {
+            logger.error("Failed to parse response: {}. Raw: {}", e, response.bodyString())
+            emptyList()
+        }
     }
 }
 
