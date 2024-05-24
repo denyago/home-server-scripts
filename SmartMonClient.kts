@@ -100,7 +100,7 @@ val thread =
                     .also {
                         if (firstTime) {
                             logger.info("Got following drives: ${it.joinToString(", ") { (key, _) -> key }}")
-                            firstTime = false
+                            if (it.isNotEmpty()) firstTime = false
                         }
                     }
                     .forEach { (key, value) ->
