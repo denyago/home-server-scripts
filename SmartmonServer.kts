@@ -51,10 +51,10 @@ val drives = doArgs.getOrDefault("<drives_files>", "").toString().split(",")
 
 val rootLogger = org.slf4j.LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME) as Logger
 rootLogger.level = logLevel
-val logger = org.slf4j.LoggerFactory.getLogger("SmartMonClient") as Logger
+val logger = org.slf4j.LoggerFactory.getLogger("SmartMonServer") as Logger
 logger.level = logLevel
 
-logger.info("Starting SmartMonServer: listening 0.0.0.0:$port, drives: ${drives.joinToString(",")}")
+logger.info("Listening 0.0.0.0:$port, drives: ${drives.joinToString(",")}")
 
 fun runCommand(command: String): String {
     val process =
