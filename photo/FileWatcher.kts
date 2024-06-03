@@ -13,7 +13,11 @@ import dev.vishna.watchservice.KWatchEvent.Kind.Deleted
 import dev.vishna.watchservice.KWatchEvent.Kind.Initialized
 import dev.vishna.watchservice.KWatchEvent.Kind.Modified
 import dev.vishna.watchservice.asWatchChannel
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.consumeEach
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.docopt.Docopt
@@ -60,6 +64,141 @@ val watchService: WatchService = FileSystems.getDefault().newWatchService()
 
 val watchChannel = currentDirectory.asWatchChannel()
 
+sealed interface Task {
+    val src: Path
+    val status: Status
+    val log: String
+
+    sealed interface Destructive : Task
+
+    sealed interface NonDestructive : Task
+
+    data class Copy(
+        override val src: Path,
+        val dest: Path,
+        override val status: Status,
+        override val log: String,
+    ) : NonDestructive {
+        constructor(src: Path, baseSourceDir: String, baseDestDir: String) : this(
+            src = src,
+            dest =
+                Paths.get(
+                    baseDestDir,
+                    src.toString().removePrefix(baseSourceDir),
+                ),
+            status = Status.Pending,
+            log = "",
+        )
+    }
+
+    data class UploadGooglePhoto(
+        override val src: Path,
+        val albumName: String,
+        override val status: Status,
+        override val log: String,
+    ) : NonDestructive {
+        constructor(src: Path, baseSourceDir: String) : this(
+            src = src,
+            albumName = sourceToAlbumName(src, baseSourceDir),
+            status = Status.Pending,
+            log = "",
+        )
+    }
+
+    data class UploadPhotoPrism(
+        override val src: Path,
+        val albumName: String,
+        override val status: Status,
+        override val log: String,
+    ) : NonDestructive {
+        constructor(src: Path, baseSourceDir: String) : this(
+            src = src,
+            albumName = sourceToAlbumName(src, baseSourceDir),
+            status = Status.Pending,
+            log = "",
+        )
+    }
+
+    data class Delete(
+        override val src: Path,
+        override val status: Status,
+        override val log: String,
+    ) : Destructive {
+        constructor(src: Path) : this(
+            src = src,
+            status = Status.Pending,
+            log = "",
+        )
+    }
+
+    enum class Status {
+        Pending,
+        Completed,
+        Failed,
+    }
+
+    companion object {
+        fun sourceToAlbumName(
+            src: Path,
+            baseSourceDir: String,
+        ): String = Path.of(src.toString().removePrefix(baseSourceDir)).parent.toString()
+    }
+}
+
+suspend fun doCopy(task: Task.Copy): Task =
+    try {
+        task.src.toFile().copyTo(task.dest.toFile(), false)
+        task.copy(
+            log = "Copied ${task.src} to ${task.dest}",
+            status = Task.Status.Completed,
+        )
+    } catch (e: Exception) {
+        task.copy(
+            log = "Failed to copy ${task.src} to ${task.dest}: ${e.message}",
+            status = Task.Status.Failed,
+        )
+    }
+
+suspend fun doUploadGooglePhoto(task: Task.UploadGooglePhoto): Task =
+    try {
+        task.copy(
+            log = "Uploaded ${task.src} to Google Photos album ${task.albumName}",
+            status = Task.Status.Completed,
+        )
+    } catch (e: Exception) {
+        task.copy(
+            log = "Failed to upload ${task.src} to Google Photos album ${task.albumName}: ${e.message}",
+            status = Task.Status.Failed,
+        )
+    }
+
+suspend fun doUploadPhotoPrism(task: Task.UploadPhotoPrism): Task =
+    try {
+        task.copy(
+            log = "Uploaded ${task.src} to PhotoPrism album ${task.albumName}",
+            status = Task.Status.Completed,
+        )
+    } catch (e: Exception) {
+        task.copy(
+            log = "Failed to upload ${task.src} to PhotoPrism album ${task.albumName}: ${e.message}",
+            status = Task.Status.Failed,
+        )
+    }
+
+suspend fun doDelete(task: Task.Delete): Task =
+    try {
+        task.src.toFile().delete()
+        task.copy(
+            log = "Deleted ${task.src}",
+            status = Task.Status.Completed,
+        )
+    } catch (e: Exception) {
+        task.copy(
+            log = "Failed to delete ${task.src}: ${e.message}",
+            status = Task.Status.Failed,
+        )
+    }
+
 runBlocking {
     launch {
         watchChannel.consumeEach {
@@ -80,15 +219,37 @@ runBlocking {
                                 }
                             }
                         } else {
-                            // 0. Create a task file:
-                            //   1. Upload to Google Photos
-                            //   2. Upload to Photoprism
-                            //      1. Upload
-                            //      2. Make Album
-                            //      3. Add to Album
-                            //   3. Delete the file
-                            //   4. Delete the task file
-                            moveTo(src, dest)
+                            val tasks =
+                                listOf(
+                                    Task.Copy(src, from, to),
+                                    Task.UploadGooglePhoto(src, from),
+                                    Task.UploadPhotoPrism(src, from),
+                                    Task.Delete(src),
+                                )
+                            logger.info("Created tasks: $tasks")
+                            val nonDestructiveTasks: List<Task.NonDestructive> =
+                                tasks.filterIsInstance<Task.NonDestructive>()
+                            val destructiveTasks: List<Task.Destructive> =
+                                tasks.filterIsInstance<Task.Destructive>()
+                            val deferredTasks: List<Deferred<Task>> =
+                                nonDestructiveTasks.map { task ->
+                                    async {
+                                        when (task) {
+                                            is Task.Copy -> doCopy(task)
+                                            is Task.UploadGooglePhoto -> doUploadGooglePhoto(task)
+                                            is Task.UploadPhotoPrism -> doUploadPhotoPrism(task)
+                                            else -> TODO() // TODO: remove
+                                        }
+                                    }
+                                } +
+                                    destructiveTasks.map { task ->
+                                        when (task) {
+                                            is Task.Delete -> async { doDelete(task) }
+                                            else -> TODO() // TODO: remove
+                                        }
+                                    }
+                            val results = deferredTasks.map { deferred -> deferred.await() }
+                            logger.info("Results: $results")
                         }
                     } catch (e: FileAlreadyExistsException) {
                         logger.error("File already exists $dest", e)
@@ -99,47 +260,7 @@ runBlocking {
     }
 }
 
-watchChannel.close() // clean up resources afterwards
-//
-// val watcher = FileSystems.getDefault().newWatchService()
-//
-// fun recursivelyRegister(path: Path) {
-//     path.toFile().listFiles()?.forEach {
-//         if (it.isDirectory) {
-//             it.toPath().register(watcher, ENTRY_CREATE, ENTRY_MODIFY)
-//             recursivelyRegister(it.toPath())
-//         }
-//     }
-// }
-//
-// recursivelyRegister(Paths.get(from))
-//
-// // Create same directory structure in the destination directory
-// Paths.get(from).toFile().walk().forEach {
-//     val dest = Paths.get(to, it.toString().removePrefix(from))
-//     if (it.isDirectory) {
-//         dest.toFile().mkdir()
-//     }
-// }
-//
-// while (true) {
-//     val key = watcher.take()
-//     key.pollEvents()
-//         .also {
-//             logger.info("Events: $it")
-//         }
-//         .forEach { event ->
-//             val src = Paths.get(from, event.context().toString())
-//             val dest = Paths.get(to, src.toString().removePrefix(from))
-//             logger.info("Moving $src to $dest")
-//             try {
-//                 src.toFile().copyTo(dest.toFile(), false)
-//             } catch (e: FileAlreadyExistsException) {
-//                 logger.error("File already exists $dest", e)
-//             }
-//         }
-//     key.reset()
-// }
+watchChannel.close()
 
 fun moveTo(
     src: Path,
